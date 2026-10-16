@@ -19,6 +19,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from PIL import Image
 from geometry_msgs.msg import Twist
+from math import sqrt
 
 
 np.set_printoptions(
@@ -175,6 +176,12 @@ class WaypointNode(Node):
         self.pose = None
         self.path = [] # Set this to your planned route (a list of grid-index tuples, in travel order) once you've computed it -- it'll automatically show up in the terminal map print
         self._last_printed_path = None
+        self.waypoints_path = []
+        self.waypoints_idx = 0
+
+        #pid objects
+        self.heading_pid = PID(kp=0.3,angle=True)
+        self.x_pid = PID(kp=3)
 
     def _print_calibration(self):
         '''--calibrate: twice a second, print the raw Optitrack pose next to the maze-frame pose and grid cell.'''
@@ -272,9 +279,180 @@ class WaypointNode(Node):
             self._last_printed_path = list(self.path)
 
         ###### INSERT CODE HERE ######
-        self.move_2D(0.5)
+        #initiate an open list and a closed list
+        #set the source and destination for each waypoint(waypoint is the destination)
+        #store source node inside open list
+        
+
+        #we need a waypoint-only path in order for the pid controller to work, so only stores the points on the paths that deviate from current robot heading
+
+
+        
+        #waypoint only list
+        if not self.path:
+            path1 = A_star(self.map_array,world_to_grid(self.pose[0],self.pose[1],self.origin,self.resolution),world_to_grid(self.goal_list[0][0],self.goal_list[0][1],self.origin,self.resolution))
+            path2 = A_star(self.map_array,world_to_grid(self.goal_list[0][0],self.goal_list[0][1],self.origin,self.resolution), world_to_grid(self.goal_list[1][0],self.goal_list[1][1],self.origin,self.resolution))
+            path3 = A_star(self.map_array,world_to_grid(self.goal_list[1][0],self.goal_list[1][1],self.origin,self.resolution),world_to_grid(self.goal_list[2][0],self.goal_list[2][1],self.origin,self.resolution))
+            path4= A_star(self.map_array,world_to_grid(self.goal_list[2][0],self.goal_list[2][1],self.origin,self.resolution),world_to_grid(self.goal_list[3][0],self.goal_list[3][1],self.origin,self.resolution))
+            path1_waypoints = waypoint_only(path1)
+            path2_waypoints = waypoint_only(path2)
+            path3_waypoints = waypoint_only(path3)
+            path4_waypoints = waypoint_only(path4)
+            self.path = path1 + path2[1:] + path3[1:] + path4[1:]
+            self.waypoints_path = path1_waypoints+path2_waypoints+path3_waypoints+path4_waypoints
+
+
+        #pid controller
+        #calculate error: wx - curr_x, wheading-curr_heading
+        if self.waypoints_idx >= len(self.waypoints_path):
+            self.move_2D(0,0,0)
+            return
+        curr_x = self.pose[0] #current x
+        curr_y = self.pose[1] #current y
+        #waypoint x and waypoint heading
+        waypoint_x, waypoint_y= grid_to_world(self.waypoints_path[self.waypoints_idx][0],self.waypoints_path[self.waypoints_idx][1],self.origin,self.resolution)
+        
+        dx = waypoint_x-curr_x
+        dy = waypoint_y-curr_y
+        dt = 0.05
+        waypoint_heading = math.degrees(math.atan2(dy,dx))
+        heading_error = wrap_deg(waypoint_heading-self.pose[2])
+        dist_error = math.hypot(dx,dy)
+        if abs(dist_error)<=0.05:
+            self.waypoints_idx+=1
+            self.heading_pid.reset()
+            self.x_pid.reset()
+            
+        else:
+            #pid control
+            heading_command = self.heading_pid.command_update(heading_error,dt)
+            if abs(heading_error)>= 10:
+                self.move_2D(0,0,heading_command)
+            else:
+                x_command = self.x_pid.command_update(dist_error,dt)
+                self.move_2D(x_command,0,heading_command)
+
         ###### INSERT CODE HERE ######
 
+#helper node class
+class EachNode():
+    def __init__(self):
+        self.parent_i = 0
+        self.parent_j = 0
+        self.total_cost = float("inf") #total cost
+        self.g = float("inf") #cost from source 
+        self.h = 0 #estimated cost to target
+#helper functions
+def calculate_h(start, dest):
+    start_row, start_col = start
+    target_row, target_col = dest #assuming dest is a tuple of 2 values
+    #calculate manhattan distance from current location to dest using pythagoras 
+    return abs(target_col-start_col)+abs(target_row-start_row)
+def is_valid(map_array,row,col):
+    r,c = len(map_array), len(map_array[0])
+    return 0<=row<r and 0<=col<c
+def is_goal(row,col,dest):
+    return row==dest[0] and col == dest[1]
+def is_blocked(map_array,row,col):
+    return map_array[row][col] ==99
+
+def A_star(map_array,startcell,goalcell):
+    open_list = []
+    closed = set()
+    #create a 2d array of the a* nodes represented by each node instance
+    rows,cols = map_array.shape
+    nodes = [[EachNode() for i in range(cols)] for j in range(rows)] #now each nodes instance can be accessed using nodes[i][j]
+    startnode = nodes[startcell[0]][startcell[1]]
+    startnode.g = 0
+    startnode.h = calculate_h(startcell,goalcell)
+    startnode.total_cost = startnode.g + startnode.h 
+    startnode.parent_i = None
+    startnode.parent_j = None
+    heapq.heappush(open_list,(startnode.total_cost,startcell[0],startcell[1]))
+    while open_list:
+        current = heapq.heappop(open_list)
+        i, j = current[1],current[2]
+        if (i,j) in closed:
+            continue
+        if is_goal(i,j,goalcell):
+            #build the path
+            path = []
+            current_node = nodes[i][j]
+            while current_node.parent_i is not None:
+                path.append((i,j)) #this is not updated
+                i,j = current_node.parent_i , current_node.parent_j
+                current_node = nodes[i][j] 
+            path.append((i,j))
+            path.reverse()
+            return path
+        closed.add((i,j))
+        nb_list = [
+            (i+1,j),(i,j+1),(i-1,j),(i,j-1)
+        ]
+        #iterate through neighbours list, check if each neighbour is within map, is a wall or not, and whether already in C.
+        for neighbour in nb_list:
+            if is_valid(map_array,neighbour[0],neighbour[1]) and not is_blocked(map_array, neighbour[0],neighbour[1]) and neighbour not in closed:
+                neighbour_node = nodes[neighbour[0]][neighbour[1]]
+                new_g = nodes[i][j].g + 1 
+                if new_g < neighbour_node.g:
+                    neighbour_node.g = new_g
+                    neighbour_node.h = calculate_h(neighbour,goalcell)
+                    neighbour_node.total_cost = neighbour_node.g + neighbour_node.h
+                    neighbour_node.parent_i, neighbour_node.parent_j = i,j
+                    heapq.heappush(open_list,(neighbour_node.total_cost,neighbour[0],neighbour[1]))
+    return []
+            
+#reduce A* path to only the necessary waypoints; helper function
+def waypoint_only(path_list):
+    output = []
+    step = (path_list[1][0]-path_list[0][0],path_list[1][1]-path_list[0][1])
+    for node_idx in range(1,len(path_list)-1):
+        curr_node = path_list[node_idx]
+        next_node = path_list[node_idx+1]
+        if step != (next_node[0]-curr_node[0],next_node[1]-curr_node[1]):
+            step = (next_node[0]-curr_node[0],next_node[1]-curr_node[1])
+            output.append(curr_node)
+    output.append(path_list[-1])
+    return output
+
+
+class PID():
+    def __init__(self,kp,ki=0.0,kd=0.0,angle=False):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.integral = 0.0
+        self.prev_error = None
+        self.angle = angle
+    def command_update(self,error,dt):
+        #finds current error, apply PID, then return a velocity command for x/heading.
+        self.integral += error*dt
+        if self.angle is True:
+            derivative = wrap_deg((error-self.prev_error))/dt if self.prev_error else 0
+        else:
+            derivative = (error-self.prev_error)/dt if self.prev_error else 0
+        self.prev_error = error
+        command = self.kp*error + self.ki*self.integral + self.kd*derivative
+        return command
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_error = None
+
+
+
+
+
+    
+
+
+
+
+
+
+
+
+        
 
 class Grid():
     '''
