@@ -30,7 +30,12 @@ set_logger_level("waypoint", level=LoggingSeverity.DEBUG) # Configure to either 
 
 occupancy_grid_resolution = 0.2 # Sim grid resolution, in metres per cell (the real maze uses the same 0.2m cells, see ca2_irl_layout.json)
 max_translate_velocity = 1.4 # Overwritten in main() based on sim vs real-life; 0.4m/s cap for real life, please keep that in place
-
+MIN_SPEED = 0.08 #need 0.2 in sim, but 0.08 works btr irl
+TURN_START_DEG = 10 #turn on spot if heading error >= this
+DRIVE_START_DEG = 3 #only start driving again once the heading error is below this 
+STEER_DEADZONE_DEG = 1.5 #while driving, ignore heading errors smaller than this so the robot doesn't react to optitrack noise
+MIN_TURN_SIM = 1.4 #slowest turn on the spot (rad/s) in gazebo
+MIN_TURN_IRL = 0.5 #slowest turn on the spot on the real robot (cap is 0.8). raise it if the robot stalls just short of lining up
 _PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
 
 
@@ -180,8 +185,16 @@ class WaypointNode(Node):
         self.waypoints_idx = 0
 
         #pid objects
-        self.heading_pid = PID(kp=0.3,angle=True)
+        self.turn_pid = PID(kp=0.3,angle=True) #turning on the spot
+        self.steer_pid = PID(kp=0.1,angle=True) #steering while driving
         self.x_pid = PID(kp=3)
+
+        #final approach flag
+        self.in_final_approach = False
+
+        #turning on the spot flag: starts True so the robot lines up before driving off
+        self.turning = True
+        self.min_turn = MIN_TURN_SIM if self.is_simulation else MIN_TURN_IRL
 
     def _print_calibration(self):
         '''--calibrate: twice a second, print the raw Optitrack pose next to the maze-frame pose and grid cell.'''
@@ -309,6 +322,7 @@ class WaypointNode(Node):
             return
         curr_x = self.pose[0] #current x
         curr_y = self.pose[1] #current y
+        curr_heading = self.pose[2]
         #waypoint x and waypoint heading
         waypoint_x, waypoint_y= grid_to_world(self.waypoints_path[self.waypoints_idx][0],self.waypoints_path[self.waypoints_idx][1],self.origin,self.resolution)
         
@@ -316,21 +330,59 @@ class WaypointNode(Node):
         dy = waypoint_y-curr_y
         dt = 0.05
         waypoint_heading = math.degrees(math.atan2(dy,dx))
-        heading_error = wrap_deg(waypoint_heading-self.pose[2])
+        heading_error = wrap_deg(waypoint_heading-curr_heading)
         dist_error = math.hypot(dx,dy)
-        if abs(dist_error)<=0.05:
-            self.waypoints_idx+=1
-            self.heading_pid.reset()
-            self.x_pid.reset()
-            
-        else:
-            #pid control
-            heading_command = self.heading_pid.command_update(heading_error,dt)
-            if abs(heading_error)>= 10:
-                self.move_2D(0,0,heading_command)
+
+        #implement final approach
+        h = math.radians(curr_heading)
+        forward_err = dx * math.cos(h) + dy * math.sin(h)
+
+        #two thresholds: turn on the spot until lined up within DRIVE_START_DEG, only go back to turning at TURN_START_DEG or more
+        #(not used during final approach, which never steers)
+        if not self.in_final_approach:
+            if self.turning and abs(heading_error) < DRIVE_START_DEG:
+                self.turning = False
+                self.steer_pid.reset() #fresh start for steering on this straight
+            elif not self.turning and abs(heading_error) >= TURN_START_DEG:
+                self.turning = True
+                self.turn_pid.reset()
+
+        if not self.in_final_approach and not self.turning and abs(dist_error)<=0.15 and abs(heading_error)<TURN_START_DEG: 
+            self.in_final_approach = True
+
+        if self.in_final_approach:
+            if forward_err <=0.01:
+                self.move_2D(0,0,0)
+                self.waypoints_idx+=1
+                self.turn_pid.reset()
+                self.steer_pid.reset()
+                self.x_pid.reset()
+                self.in_final_approach=False
+                self.turning = True #line up with the next waypoint before driving off
             else:
+                x_command = self.x_pid.command_update(forward_err, dt)
+                forward = max(x_command, MIN_SPEED)
+                self.move_2D(forward, 0, 0)          # turn = 0: no steering in final approach
+                
+
+        #original pid control before final approach method used
+        # if abs(dist_error)<=0.05:
+        #     self.waypoints_idx+=1
+        #     self.heading_pid.reset()
+        #     self.x_pid.reset()
+        else:
+            if self.turning:
+                #turn on the spot towards the waypoint
+                turn_command = self.turn_pid.command_update(heading_error,dt)
+                turn_command = math.copysign(max(abs(turn_command), self.min_turn), heading_error) #never slower than the robot can actually turn
+                self.move_2D(0,0,turn_command)
+            else:
+                #drive forward with gentle steering, ignoring tiny heading errors
                 x_command = self.x_pid.command_update(dist_error,dt)
-                self.move_2D(x_command,0,heading_command)
+                steer_command = self.steer_pid.command_update(heading_error,dt)
+                if abs(heading_error) < STEER_DEADZONE_DEG:
+                    steer_command = 0.0
+                self.move_2D(x_command,0,steer_command)
 
         ###### INSERT CODE HERE ######
 
