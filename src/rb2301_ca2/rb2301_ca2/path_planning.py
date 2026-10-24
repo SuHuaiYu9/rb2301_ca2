@@ -33,7 +33,7 @@ max_translate_velocity = 1.4 # Overwritten in main() based on sim vs real-life; 
 MIN_SPEED = 0.08 #need 0.2 in sim, but 0.08 works btr irl
 TURN_START_DEG = 10 #turn on spot if heading error >= this
 DRIVE_START_DEG = 3 #only start driving again once the heading error is below this 
-STEER_DEADZONE_DEG = 1.5 #while driving, ignore heading errors smaller than this so the robot doesn't react to optitrack noise
+STEER_DEADZONE_DEG = 3 #while driving, ignore heading errors smaller than this so the robot doesn't react to optitrack noise
 MIN_TURN_SIM = 1.4 #slowest turn on the spot (rad/s) in gazebo
 MIN_TURN_IRL = 0.5 #slowest turn on the spot on the real robot (cap is 0.8). raise it if the robot stalls just short of lining up
 _PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -324,6 +324,7 @@ class WaypointNode(Node):
         curr_y = self.pose[1] #current y
         curr_heading = self.pose[2]
         #waypoint x and waypoint heading
+        
         waypoint_x, waypoint_y= grid_to_world(self.waypoints_path[self.waypoints_idx][0],self.waypoints_path[self.waypoints_idx][1],self.origin,self.resolution)
         
         dx = waypoint_x-curr_x
@@ -347,7 +348,7 @@ class WaypointNode(Node):
                 self.turning = True
                 self.turn_pid.reset()
 
-        if not self.in_final_approach and not self.turning and abs(dist_error)<=0.15 and abs(heading_error)<TURN_START_DEG: 
+        if not self.in_final_approach and not self.turning and abs(dist_error)<=0.10 and abs(heading_error)<TURN_START_DEG: 
             self.in_final_approach = True
 
         if self.in_final_approach:
